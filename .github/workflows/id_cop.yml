@@ -1,0 +1,146 @@
+name: Check Migration Indexes
+on:
+  pull_request:
+    paths:
+      - 'db/migrate/**.rb'
+
+jobs:
+  check-indexes:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Check migrations for missing indexes
+        run: |
+          # Get list of changed migration files
+          CHANGED_FILES=$(git diff --name-only origin/${{ github.base_ref }} ${{ github.sha }} | grep "db/migrate/.*\.rb$" || true)
+
+          if [ -z "$CHANGED_FILES" ]; then
+            echo "No migration files changed"
+            exit 0
+          fi
+
+          # Read current schema.rb to check for existing indexes
+          SCHEMA_FILE="db/schema.rb"
+          declare -A EXISTING_INDEXES
+          if [ -f "$SCHEMA_FILE" ]; then
+            while IFS= read -r line; do
+              if echo "$line" | grep -q "add_index"; then
+                table=$(echo "$line" | sed -n 's/.*add_index[[:space:]]*:\([^,]*\).*$/\1/p')
+                columns=$(echo "$line" | sed -n 's/.*columns:[[:space:]]*\[\([^]]*\)\].*$/\1/p')
+                if [ ! -z "$table" ] && [ ! -z "$columns" ]; then
+                  EXISTING_INDEXES["$table:$columns"]=1
+                fi
+              fi
+            done < "$SCHEMA_FILE"
+          fi
+
+          # Function to check if an index exists in schema.rb
+          index_exists() {
+            local table="$1"
+            local column="$2"
+            if [ "${EXISTING_INDEXES[$table:$column]}" = "1" ]; then
+              return 0
+            fi
+            return 1
+          }
+
+          # Function to check a migration file for missing indexes
+          check_migration() {
+            local file="$1"
+            echo "Checking migration: $file"
+
+            # Store table name for create_table blocks
+            current_table=""
+            # Store columns that need indexes
+            declare -A needed_indexes
+            # Store defined indexes
+            declare -A defined_indexes
+
+            while IFS= read -r line; do
+              # Handle create_table blocks
+              if echo "$line" | grep -q "create_table.*do[[:space:]]*|.*|"; then
+                current_table=$(echo "$line" | sed -n 's/.*create_table[[:space:]]*:\([^,[:space:]]*\).*$/\1/p')
+              elif echo "$line" | grep -q "end"; then
+                current_table=""
+              fi
+
+              # Check for foreign key columns in different formats
+              # 1. Standard add_column
+              if echo "$line" | grep -q "add_column.*_id[,\s]"; then
+                table=$(echo "$line" | sed -n 's/.*add_column[[:space:]]*:\([^,]*\).*$/\1/p')
+                column=$(echo "$line" | sed -n 's/.*:[^,]*,[[:space:]]*:\([^,]*\).*$/\1/p')
+                needed_indexes["$table:$column"]=1
+              fi
+
+              # 2. t.references or t.belongs_to inside create_table
+              if [ ! -z "$current_table" ] && echo "$line" | grep -q "t\.\(references\|belongs_to\)"; then
+                column=$(echo "$line" | sed -n 's/.*t\.\(references\|belongs_to\)[[:space:]]*:\([^,]*\).*$/\2_id/p')
+                if [ ! -z "$column" ]; then
+                  needed_indexes["$current_table:$column"]=1
+                fi
+              fi
+
+              # 3. t.column with _id suffix
+              if [ ! -z "$current_table" ] && echo "$line" | grep -q "t\.column.*_id[,\s]"; then
+                column=$(echo "$line" | sed -n 's/.*t\.column[[:space:]]*:\([^,]*\).*$/\1/p')
+                if [ ! -z "$column" ]; then
+                  needed_indexes["$current_table:$column"]=1
+                fi
+              fi
+
+              # Check for add_index statements (including composite indexes)
+              if echo "$line" | grep -q "add_index"; then
+                table=$(echo "$line" | sed -n 's/.*add_index[[:space:]]*:\([^,]*\).*$/\1/p')
+                # Handle both single column and array syntax
+                if echo "$line" | grep -q "\[\|,"; then
+                  columns=$(echo "$line" | sed -n 's/.*\[\([^]]*\)\].*$/\1/p')
+                else
+                  columns=$(echo "$line" | sed -n 's/.*:[^,]*,[[:space:]]*:\([^,]*\).*$/\1/p')
+                fi
+                if [ ! -z "$table" ] && [ ! -z "$columns" ]; then
+                  defined_indexes["$table:$columns"]=1
+                fi
+              fi
+            done < "$file"
+
+            # Check for missing indexes
+            for key in "${!needed_indexes[@]}"; do
+              table=${key%:*}
+              column=${key#*:}
+
+              # Check if index is defined in this migration
+              index_found=false
+              for defined_key in "${!defined_indexes[@]}"; do
+                if echo "$defined_key" | grep -q "$table:.*$column"; then
+                  index_found=true
+                  break
+                fi
+              done
+
+              # If not found in this migration, check schema.rb
+              if [ "$index_found" = false ]; then
+                if ! index_exists "$table" "$column"; then
+                  echo "::error file=$file::Missing index for foreign key column '$column' in table '$table'"
+                  return 1
+                fi
+              fi
+            done
+
+            return 0
+          }
+
+          # Check each changed migration file
+          success=true
+          for file in $CHANGED_FILES; do
+            if ! check_migration "$file"; then
+              success=false
+            fi
+          done
+
+          if [ "$success" = false ]; then
+            echo "Found migrations with missing indexes on foreign key columns"
+            exit 1
+          fi
