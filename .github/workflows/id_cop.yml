@@ -14,13 +14,28 @@ jobs:
 
       - name: Check migrations for missing indexes
         env:
-          # Set DEBUG=1 to enable debug output
           DEBUG: ${{ inputs.debug || '0' }}
         run: |
           debug() {
             if [ "${DEBUG}" = "1" ]; then
               echo "$@"
             fi
+          }
+
+          # Function to check if an index exists in schema.rb
+          index_exists() {
+            local table="$1"
+            local column="$2"
+
+            debug "Checking if index exists for $table:$column"
+            for key in "${!EXISTING_INDEXES[@]}"; do
+              if echo "$key" | grep -q "$table:.*$column"; then
+                debug "Found existing index in schema: $key"
+                return 0
+              fi
+            done
+            debug "No existing index found in schema"
+            return 1
           }
 
           # Get list of changed migration files
@@ -30,9 +45,6 @@ jobs:
             debug "No migration files changed"
             exit 0
           fi
-
-          debug "Changed migration files:"
-          debug "$CHANGED_FILES"
 
           # Read current schema.rb
           SCHEMA_FILE="db/schema.rb"
