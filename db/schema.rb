@@ -10,10 +10,10 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[7.2].define(version: 2024_10_23_055531) do
+ActiveRecord::Schema[7.2].define(version: 2024_10_23_055709) do
   create_table "albums", force: :cascade do |t|
     t.string "title"
-    t.string "comment_id"
+    t.bigint "comment_id"
     t.datetime "created_at", null: false
     t.datetime "updated_at", null: false
   end
