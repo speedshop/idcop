@@ -1,75 +1,78 @@
 # Rails Migration Index Checker
 
-This GitHub Action ensures that all foreign key columns (columns ending in `_id`) in your Rails migrations have corresponding indexes. This helps maintain database performance by preventing common indexing oversights during development.
+This GitHub Action ensures that all foreign key columns in your Rails application have corresponding database indexes. It checks your `schema.rb` to catch cases where foreign keys might be created or modified across multiple migrations.
+
+## Why Use This?
+
+Foreign keys without indexes can cause significant performance issues:
+- Slow JOIN operations
+- Poor query performance on foreign key lookups
+- Potential table scans instead of index scans
 
 ## Features
 
-### 1. Comprehensive Migration Syntax Detection
-The checker recognizes foreign keys defined in multiple formats:
-```ruby
-# Standard add_column
-add_column :users, :company_id, :bigint
+### 1. Comprehensive Foreign Key Detection
+Detects foreign keys defined in various ways:
 
-# Within create_table blocks
-create_table :users do |t|
-  t.references :company
-  t.belongs_to :organization
-  t.column :department_id, :integer
-end
+```ruby
+# Direct column definitions
+t.bigint :company_id
+t.integer :user_id
+
+# Rails associations
+t.references :organization
+t.belongs_to :department
+
+# Columns changed to foreign keys in later migrations
+t.string :comment_id  # Initially string
+change_column :table, :comment_id, :bigint  # Changed later
 ```
 
 ### 2. Smart Index Detection
-Indexes can be recognized in various formats:
+Recognizes indexes in multiple formats:
 
-- Single column indexes:
 ```ruby
+# Single column indexes
 add_index :users, :company_id
-```
 
-- Composite indexes (foreign key can be part of a larger index):
-```ruby
+# Multi-column indexes
 add_index :users, [:company_id, :department_id]
+
+# Index defined in a separate migration
+add_index :albums, :comment_id
 ```
 
 ### 3. Schema-Aware
-The checker won't fail if an index already exists in your schema.rb:
-- Reads current schema.rb to understand existing indexes
-- Prevents duplicate index warnings
-- Handles both simple and composite indexes in the schema
-
-### 4. Cross-Migration Support
-Handles indexes that might be added in separate migrations within the same PR:
-- Tracks all migrations being added/modified
-- Understands relationships between migrations
-- Won't fail if an index is added in a different migration file in the same PR
+- Uses `schema.rb` as the source of truth
+- Catches foreign keys created across multiple migrations
+- Detects when string/text columns are changed to foreign keys
+- Validates against existing indexes
 
 ## Usage
 
 1. Add this file to `.github/workflows/check_migration_indexes.yml`
-2. The action will automatically run on any PR that includes changes to files in `db/migrate/`
+2. The action automatically runs on PRs with migration changes
+3. Enable debug mode by setting `DEBUG: "1"` in the workflow
 
-## Example Output
+## Error Messages
 
-When it finds a missing index:
+The action provides detailed error messages:
+
 ```
-Error: Missing index for foreign key column 'company_id' in table 'users'
-```
-
-## Configuration
-
-The action runs automatically with these triggers:
-```yaml
-on:
-  pull_request:
-    paths:
-      - 'db/migrate/**.rb'
+Error: Missing index for foreign key column 'comment_id' in table 'albums'
+Details:
+- Column type: bigint (64-bit integer typically used for foreign keys)
+- Column appears to be a foreign key (ends with _id)
+- Please add an index to improve query performance
+- You can add it using: add_index :albums, :comment_id
 ```
 
 ## Common Scenarios
 
 ### ✅ Will Pass
+
 ```ruby
-# Migration 1
+# Single migration with index
 class AddCompanyToUsers < ActiveRecord::Migration[7.0]
   def change
     add_column :users, :company_id, :bigint
@@ -77,10 +80,19 @@ class AddCompanyToUsers < ActiveRecord::Migration[7.0]
   end
 end
 
-# Migration 2
-class AddCompanyAndDepartment < ActiveRecord::Migration[7.0]
+# References with index
+class CreateOrders < ActiveRecord::Migration[7.0]
   def change
-    add_column :users, :company_id, :bigint
+    create_table :orders do |t|
+      t.references :user, index: true
+      t.timestamps
+    end
+  end
+end
+
+# Multi-column index
+class AddDepartmentToUsers < ActiveRecord::Migration[7.0]
+  def change
     add_column :users, :department_id, :bigint
     add_index :users, [:company_id, :department_id]
   end
@@ -88,50 +100,87 @@ end
 ```
 
 ### ❌ Will Fail
+
 ```ruby
+# Missing index
 class AddCompanyToUsers < ActiveRecord::Migration[7.0]
   def change
     add_column :users, :company_id, :bigint
     # Missing index!
   end
 end
+
+# Foreign key created across migrations
+class CreateAlbums < ActiveRecord::Migration[7.0]
+  def change
+    create_table :albums do |t|
+      t.string :comment_id  # Starts as string
+    end
+  end
+end
+
+class ChangeCommentIdType < ActiveRecord::Migration[7.0]
+  def change
+    change_column :albums, :comment_id, :bigint  # Changed to foreign key
+    # Needs an index!
+  end
+end
 ```
 
-## Implementation Details
+## Debug Mode
 
-### Error Detection
-- Scans for `add_column` statements ending in `_id`
-- Checks for corresponding `add_index` statements
-- Verifies against existing schema.rb
-- Handles multi-column indexes
+Enable detailed logging by setting the DEBUG environment variable:
 
-### Parsing Strategy
-The checker uses a line-by-line parsing strategy with context awareness:
-- Tracks current table context in `create_table` blocks
-- Maintains sets of needed and defined indexes
-- Cross-references against schema.rb
-- Handles various syntax patterns through regex matching
+```yaml
+- name: Check migrations for missing indexes
+  env:
+    DEBUG: "1"
+  run: ...
+```
+
+Debug output includes:
+- Detected foreign key columns
+- Found indexes
+- Schema parsing details
+- Column type information
+
+## Types of Foreign Keys Detected
+
+1. **Bigint Columns** (`t.bigint`)
+   - 64-bit integers typically used for foreign keys
+   - Standard in modern Rails applications
+
+2. **Integer Columns** (`t.integer`)
+   - 32-bit integers commonly used for foreign keys
+   - Legacy or smaller range foreign keys
+
+3. **References** (`t.references`, `t.belongs_to`)
+   - Rails association helpers
+   - Automatically adds `_id` suffix
 
 ## Best Practices
 
-1. Always add indexes in the same migration where you add the foreign key
-2. Use composite indexes when you frequently query on multiple columns together
-3. Consider using `references` with `index: true` for cleaner migrations:
-```ruby
-add_reference :users, :company, index: true
-```
+1. Always add indexes when creating foreign key columns
+2. Use `t.references` with `index: true` for cleaner migrations
+3. Consider composite indexes for frequently combined queries
+4. Add indexes in the same migration where foreign keys are created
+5. Don't forget indexes when changing column types to foreign keys
 
 ## Limitations
 
-1. The checker only looks for columns ending in `_id`
-2. It assumes standard Rails migration syntax
-3. May not catch extremely complex or non-standard migration patterns
-4. Doesn't analyze index effectiveness or suggest optimizations
+1. Only detects columns ending in `_id`
+2. Assumes standard Rails naming conventions
+3. Requires `schema.rb` (not `structure.sql`)
+4. Cannot detect custom foreign key naming patterns
 
 ## Contributing
 
-Feel free to submit issues and enhancement requests!
+Feel free to open issues or PRs for:
+- Additional foreign key patterns
+- New index detection methods
+- Better error messages
+- Performance improvements
 
 ## License
 
-This project is available as open source under the terms of the MIT License.
+This project is available under the MIT License.
