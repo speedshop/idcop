@@ -2,6 +2,8 @@
 
 This GitHub Action ensures that all foreign key columns in your Rails application have corresponding database indexes. It checks your `schema.rb` to catch cases where foreign keys might be created or modified across multiple migrations.
 
+UNRELATED README CHANGE
+
 ## Why Use This?
 
 Foreign keys without indexes can cause significant performance issues:
