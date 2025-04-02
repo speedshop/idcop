@@ -53,6 +53,18 @@ jobs:
       - name: Lint code for consistent style
         run: bin/rubocop -f github
 
+  check-indexes:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check Migration Indexes
+        uses: speedshop/ids_must_be_indexed@v1.2.1
+        with:
+          debug: '1'
+
   test:
     runs-on: ubuntu-latest
 
